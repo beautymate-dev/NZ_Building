@@ -1,7 +1,7 @@
 # NZ Building Code Telegram Bot
 
-A Telegram bot that answers questions about the New Zealand Building Code using Claude AI.
-Uses the NZBC reference document as its primary knowledge base, with live web search fallback to `building.govt.nz`.
+A Telegram bot that answers questions about the New Zealand Building Code, powered by an LLM via [OpenRouter](https://openrouter.ai).
+Uses the NZBC reference document as its primary knowledge base, with live web search fallback (via OpenRouter's `:online` plugin) to `building.govt.nz`.
 
 ---
 
@@ -24,11 +24,12 @@ Uses the NZBC reference document as its primary knowledge base, with live web se
 2. Send `/newbot` and follow the prompts
 3. Copy the **bot token** you receive (looks like `123456:ABC-DEF...`)
 
-### Step 2: Get your Anthropic API key
+### Step 2: Get your OpenRouter API key
 
-1. Go to [console.anthropic.com](https://console.anthropic.com)
-2. Create an API key under **API Keys**
+1. Go to [openrouter.ai](https://openrouter.ai) and sign in
+2. Create an API key under **Keys**
 3. Copy it
+4. Add credit (or attach a payment method) so the key can be used
 
 ### Step 3: Prepare the knowledge base
 
@@ -51,7 +52,8 @@ Commit `nzbc_knowledge.txt` to your repo so Railway can use it.
 | Variable | Value |
 |---|---|
 | `TELEGRAM_TOKEN` | Your BotFather token |
-| `ANTHROPIC_API_KEY` | Your Anthropic key |
+| `OPENROUTER_API_KEY` | Your OpenRouter key |
+| `OPENROUTER_MODEL` | *(optional)* Model slug, e.g. `anthropic/claude-sonnet-4.6`, `anthropic/claude-opus-4.7`, `openai/gpt-5`. Defaults to `anthropic/claude-sonnet-4.6`. The bot automatically appends `:online` to enable web search. |
 | `ALLOWED_USERNAMES` | `alice,bob,charlie` (comma-separated, no @) |
 
 4. Railway will auto-deploy. Check **Logs** to confirm `Bot is polling...`
@@ -122,8 +124,10 @@ If you update the NZBC reference document:
 ## Costs
 
 - **Railway**: Free tier includes 500 hours/month (enough for a small team)
-- **Anthropic**: Pay-per-use. claude-sonnet-4 costs ~$3/M input tokens, ~$15/M output tokens.
-  A typical question costs roughly $0.01–0.03 NZD.
+- **OpenRouter**: Pay-per-use, billed per model. Claude Sonnet 4.6 is roughly $3/M input
+  tokens and $15/M output tokens; GPT-5 and Opus models are higher. The `:online` web
+  plugin adds a small per-request fee for live search results.
+  A typical question costs roughly $0.01–0.03 NZD on Sonnet.
 
 ---
 

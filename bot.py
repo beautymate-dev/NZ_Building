@@ -1,17 +1,16 @@
 """
 NZ Building Code Telegram Bot
-Answers building code questions using Claude AI.
-Knowledge source: embedded NZBC document + web search fallback.
+Answers building code questions using an LLM via OpenRouter.
+Knowledge source: embedded NZBC document + web search via OpenRouter ':online'.
 """
 
 import os
 import logging
-import json
 from pathlib import Path
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.constants import ParseMode, ChatAction
-import anthropic
+from openai import OpenAI, OpenAIError
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -22,7 +21,9 @@ log = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
+# ':online' enables OpenRouter's built-in web search plugin.
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "anthropic/claude-sonnet-4.6") + ":online"
 ALLOWED_USERNAMES = set(filter(None, os.environ.get("ALLOWED_USERNAMES", "").split(",")))
 NZBC_DOC_PATH = Path(__file__).parent / "nzbc_knowledge.txt"
 
@@ -47,8 +48,8 @@ Your knowledge base contains a structured summary of the NZBC (Building Regulati
 administered by MBIE. When answering:
 
 1. FIRST check the provided knowledge base below for relevant clause information.
-2. If the knowledge base doesn't fully answer the question, use the web_search tool to check 
-   building.govt.nz or legislation.govt.nz for current information.
+2. If the knowledge base doesn't fully answer the question, you have access to live web
+   results — prefer building.govt.nz or legislation.govt.nz for current information.
 3. Always cite which clause (e.g. B1, E2, H1) is relevant to the question.
 4. Be precise about performance requirements, R-values, dimensions, and timeframes.
 5. Note when acceptable solutions (AS) or verification methods (VM) are relevant.
@@ -67,74 +68,39 @@ Format responses for Telegram:
 --- END KNOWLEDGE BASE ---
 """
 
-# ── Anthropic client ──────────────────────────────────────────────────────────
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
-TOOLS = [
-    {
-        "type": "web_search_20250305",
-        "name": "web_search",
-        "max_uses": 3,
-    }
-]
+# ── OpenRouter client (OpenAI-compatible) ─────────────────────────────────────
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY,
+)
 
 
-def ask_claude(user_id: int, question: str) -> str:
-    """Send question to Claude with conversation history and return answer."""
+def ask_llm(user_id: int, question: str) -> str:
+    """Send question to the LLM with conversation history and return answer."""
     history = conversation_history.setdefault(user_id, [])
 
-    # Add user message
     history.append({"role": "user", "content": question})
 
-    # Trim history to avoid token bloat (keep last N pairs)
     if len(history) > MAX_HISTORY * 2:
         history[:] = history[-(MAX_HISTORY * 2):]
 
     try:
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+        response = client.chat.completions.create(
+            model=OPENROUTER_MODEL,
             max_tokens=1500,
-            system=SYSTEM_PROMPT,
-            tools=TOOLS,
-            messages=history,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                *history,
+            ],
         )
 
-        # Handle tool use loop (web search)
-        while response.stop_reason == "tool_use":
-            tool_results = []
-            for block in response.content:
-                if block.type == "tool_use":
-                    log.info(f"Web search: {block.input.get('query', '')}")
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": "Search executed.",  # Anthropic handles the actual search
-                    })
-
-            # Append assistant response + tool results and continue
-            history.append({"role": "assistant", "content": response.content})
-            history.append({"role": "user", "content": tool_results})
-
-            response = client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=1500,
-                system=SYSTEM_PROMPT,
-                tools=TOOLS,
-                messages=history,
-            )
-
-        # Extract text from final response
-        answer = " ".join(
-            block.text for block in response.content if hasattr(block, "text")
-        ).strip()
-
-        # Save final assistant turn to history
+        answer = (response.choices[0].message.content or "").strip()
         history.append({"role": "assistant", "content": answer})
 
         return answer or "I couldn't generate a response. Please try rephrasing your question."
 
-    except anthropic.APIError as e:
-        log.error(f"Anthropic API error: {e}")
+    except OpenAIError as e:
+        log.error(f"OpenRouter API error: {e}")
         return "⚠️ There was an error reaching the AI service. Please try again shortly."
 
 
@@ -221,7 +187,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         action=ChatAction.TYPING,
     )
 
-    answer = ask_claude(user.id, question)
+    answer = ask_llm(user.id, question)
 
     # Telegram max message length is 4096 chars; split if needed
     if len(answer) <= 4096:
