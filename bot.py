@@ -27,6 +27,8 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
 # ':online' enables OpenRouter's built-in web search plugin.
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "anthropic/claude-sonnet-4.6") + ":online"
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://nzbuilding-production.up.railway.app")
+PORT = int(os.environ.get("PORT", 8080))
 ALLOWED_USERNAMES = set(filter(None, os.environ.get("ALLOWED_USERNAMES", "").split(",")))
 NZBC_DOC_PATH = Path(__file__).parent / "nzbc_knowledge.txt"
 NZS3604_CHUNKS_PATH = Path(__file__).parent / "nzs3604_chunks.json"
@@ -308,8 +310,13 @@ def main() -> None:
     app.add_handler(CommandHandler("clauses", clauses))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    log.info("Bot is polling...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    log.info(f"Starting webhook on port {PORT} → {WEBHOOK_URL}")
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        webhook_url=WEBHOOK_URL,
+        allowed_updates=Update.ALL_TYPES,
+    )
 
 
 if __name__ == "__main__":
