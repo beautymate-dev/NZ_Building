@@ -5,6 +5,9 @@ Knowledge source: embedded NZBC document + web search via OpenRouter ':online'.
 """
 
 import os
+import json
+import math
+import string
 import logging
 from pathlib import Path
 from telegram import Update
@@ -26,6 +29,7 @@ OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "anthropic/claude-sonnet-4.6") + ":online"
 ALLOWED_USERNAMES = set(filter(None, os.environ.get("ALLOWED_USERNAMES", "").split(",")))
 NZBC_DOC_PATH = Path(__file__).parent / "nzbc_knowledge.txt"
+NZS3604_CHUNKS_PATH = Path(__file__).parent / "nzs3604_chunks.json"
 
 # Conversation history per user (in-memory; resets on restart)
 # Format: { user_id: [{"role": ..., "content": ...}, ...] }
@@ -41,32 +45,105 @@ def load_knowledge() -> str:
 
 NZBC_KNOWLEDGE = load_knowledge()
 
-SYSTEM_PROMPT = f"""You are an expert assistant specialising in the New Zealand Building Code (NZBC).
-You help building professionals, designers, and homeowners understand the NZ Building Code requirements.
+# ── Load NZS 3604 chunks ──────────────────────────────────────────────────────
+def load_nzs3604_chunks() -> list[dict]:
+    if NZS3604_CHUNKS_PATH.exists():
+        chunks = json.loads(NZS3604_CHUNKS_PATH.read_text(encoding="utf-8"))
+        log.info(f"Loaded {len(chunks)} NZS 3604 chunks")
+        return chunks
+    log.warning("nzs3604_chunks.json not found — NZS 3604 search disabled")
+    return []
 
-Your knowledge base contains a structured summary of the NZBC (Building Regulations 1992, Schedule 1), 
-administered by MBIE. When answering:
+NZS3604_CHUNKS = load_nzs3604_chunks()
 
-1. FIRST check the provided knowledge base below for relevant clause information.
-2. If the knowledge base doesn't fully answer the question, you have access to live web
-   results — prefer building.govt.nz or legislation.govt.nz for current information.
-3. Always cite which clause (e.g. B1, E2, H1) is relevant to the question.
-4. Be precise about performance requirements, R-values, dimensions, and timeframes.
-5. Note when acceptable solutions (AS) or verification methods (VM) are relevant.
-6. Always recommend users verify with their Building Consent Authority (BCA) or a licensed 
-   building professional for their specific project.
-7. Keep answers clear and practical. Use plain language where possible.
-8. If asked about something outside the Building Code scope, say so clearly.
+# Pre-tokenise every chunk for fast keyword search
+_STOP_WORDS = {
+    "the", "a", "an", "and", "or", "of", "in", "to", "for", "is", "are",
+    "be", "with", "that", "this", "it", "by", "from", "at", "as", "on",
+    "not", "shall", "must", "may", "where", "when", "which", "all", "any",
+    "each", "other", "than", "its", "their", "have", "has", "been",
+}
+
+def _tokenize(text: str) -> set[str]:
+    text = text.lower().translate(str.maketrans("", "", string.punctuation))
+    return {w for w in text.split() if w not in _STOP_WORDS and len(w) > 2}
+
+_CHUNK_TOKENS: list[set[str]] = [_tokenize(c["content"]) for c in NZS3604_CHUNKS]
+
+# IDF weights — rarer words score higher
+_DOC_COUNT = len(_CHUNK_TOKENS) or 1
+_IDF: dict[str, float] = {}
+for _tokens in _CHUNK_TOKENS:
+    for _t in _tokens:
+        _IDF[_t] = _IDF.get(_t, 0) + 1
+_IDF = {t: math.log(_DOC_COUNT / df) for t, df in _IDF.items()}
+
+
+def search_nzs3604(query: str, top_n: int = 4) -> str:
+    """Return the top_n most relevant NZS 3604 chunks for query, as a string."""
+    if not NZS3604_CHUNKS:
+        return ""
+    query_tokens = _tokenize(query)
+    if not query_tokens:
+        return ""
+    scores = []
+    for i, chunk_tokens in enumerate(_CHUNK_TOKENS):
+        score = sum(_IDF.get(t, 0) for t in query_tokens & chunk_tokens)
+        scores.append((score, i))
+    scores.sort(reverse=True)
+    top_indices = [i for score, i in scores[:top_n] if score > 0]
+    if not top_indices:
+        return ""
+    parts = []
+    for i in top_indices:
+        c = NZS3604_CHUNKS[i]
+        parts.append(
+            f"[NZS 3604 — {c['section']} (pp. {c['pages']})]\n{c['content']}"
+        )
+    return "\n\n---\n\n".join(parts)
+
+_SYSTEM_BASE = f"""You are an expert assistant specialising in New Zealand timber-framed construction \
+and the NZ Building Code (NZBC).
+You help building professionals, designers, and homeowners understand construction requirements.
+
+When answering, follow this priority order:
+
+1. *NZS 3604 (Timber Framed Buildings)* — check the retrieved sections at the top of this prompt first. \
+These are the most authoritative source for timber framing questions.
+2. *NZBC knowledge base* — check this for performance requirements and clause references (B1, E2, H1, etc.).
+3. *Live web search* — if neither source fully answers the question, you have access to live results. \
+Prefer building.govt.nz, legislation.govt.nz, and nzs.co.nz.
+
+Always:
+- Cite the specific NZS 3604 clause or table number (e.g. "NZS 3604 Table 8.1") when available.
+- Cite the relevant NZBC clause (e.g. B1, E2) where applicable.
+- Be precise about dimensions, spacings, fixings, R-values, and load requirements.
+- Note when acceptable solutions (AS) or verification methods (VM) apply.
+- Recommend users verify with their BCA or a licensed building professional for their specific project.
+- Keep answers clear and practical. Use plain language where possible.
+- If a question is outside timber framing and building code scope, say so clearly.
 
 Format responses for Telegram:
-- Use *bold* for clause references and key terms
-- Use short paragraphs (Telegram is a chat interface)
-- End complex answers with a brief "Source" line citing the relevant clause and building.govt.nz
+- Use *bold* for clause/table references and key terms
+- Use short paragraphs
+- End complex answers with a brief "Source" line (e.g. "Source: NZS 3604 cl. 8.7.2 / NZBC B1")
 
 --- NZBC KNOWLEDGE BASE ---
 {NZBC_KNOWLEDGE}
---- END KNOWLEDGE BASE ---
+--- END NZBC KNOWLEDGE BASE ---
 """
+
+
+def build_system_prompt(nzs_context: str) -> str:
+    """Prepend any retrieved NZS 3604 sections to the base system prompt."""
+    if not nzs_context:
+        return _SYSTEM_BASE
+    return (
+        "--- NZS 3604 RELEVANT SECTIONS (check these first) ---\n"
+        + nzs_context
+        + "\n--- END NZS 3604 SECTIONS ---\n\n"
+        + _SYSTEM_BASE
+    )
 
 # ── OpenRouter client (OpenAI-compatible) ─────────────────────────────────────
 client = OpenAI(
@@ -84,12 +161,17 @@ def ask_llm(user_id: int, question: str) -> str:
     if len(history) > MAX_HISTORY * 2:
         history[:] = history[-(MAX_HISTORY * 2):]
 
+    # Retrieve relevant NZS 3604 sections for this query
+    nzs_context = search_nzs3604(question)
+    if nzs_context:
+        log.info(f"NZS 3604 context injected ({len(nzs_context)} chars)")
+
     try:
         response = client.chat.completions.create(
             model=OPENROUTER_MODEL,
             max_tokens=1500,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": build_system_prompt(nzs_context)},
                 *history,
             ],
         )

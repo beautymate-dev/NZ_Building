@@ -5,3 +5,6 @@ __pycache__/
 .DS_Store
 venv/
 .venv/
+
+# NZS standard PDF — copyrighted, do not commit
+nzs-3604.pdf
