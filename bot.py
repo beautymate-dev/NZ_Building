@@ -162,23 +162,41 @@ def ask_llm(user_id: int, question: str) -> str:
         history[:] = history[-(MAX_HISTORY * 2):]
 
     # Retrieve relevant NZS 3604 sections for this query
-    nzs_context = search_nzs3604(question)
+    nzs_context = search_nzs3604(question, top_n=3)
     if nzs_context:
         log.info(f"NZS 3604 context injected ({len(nzs_context)} chars)")
 
-    try:
+    def _call(system: str) -> str | None:
         response = client.chat.completions.create(
             model=OPENROUTER_MODEL,
             max_tokens=1500,
             messages=[
-                {"role": "system", "content": build_system_prompt(nzs_context)},
+                {"role": "system", "content": system},
                 *history,
             ],
         )
+        choice = response.choices[0]
+        finish = choice.finish_reason
+        content = (choice.message.content or "").strip()
+        log.info(f"OpenRouter finish_reason={finish!r} content_len={len(content)}")
+        if not content:
+            log.warning(f"Empty content — full choice: {choice}")
+        return content or None
 
-        answer = (response.choices[0].message.content or "").strip()
+    try:
+        answer = _call(build_system_prompt(nzs_context))
+
+        # If the model returned nothing (e.g. tool-call mid-flight with :online),
+        # retry once with a minimal system prompt so the user always gets a reply.
+        if answer is None and nzs_context:
+            log.warning("Empty response with NZS context — retrying without it")
+            answer = _call(_SYSTEM_BASE)
+
+        if answer is None:
+            log.error("Still empty after retry — giving up")
+            answer = ""
+
         history.append({"role": "assistant", "content": answer})
-
         return answer or "I couldn't generate a response. Please try rephrasing your question."
 
     except OpenAIError as e:
