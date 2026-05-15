@@ -25,8 +25,7 @@ log = logging.getLogger(__name__)
 # ── Config ────────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
-# ':online' enables OpenRouter's built-in web search plugin.
-OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "anthropic/claude-sonnet-4.6") + ":online"
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "anthropic/claude-sonnet-4.6")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://nzbuilding-production.up.railway.app")
 PORT = int(os.environ.get("PORT", 8080))
 ALLOWED_USERNAMES = set(filter(None, os.environ.get("ALLOWED_USERNAMES", "").split(",")))
@@ -111,17 +110,14 @@ You help NZ building professionals, designers, and homeowners understand NZ cons
 CRITICAL RULES — NEVER BREAK THESE:
 - You ONLY answer based on NEW ZEALAND standards, codes, and regulations.
 - NEVER cite or reference building codes from other countries (Australia, USA, Canada, UK, etc.).
-- If you use web search, ONLY use results from NZ sources: building.govt.nz, legislation.govt.nz, \
-nzs.co.nz, or other .govt.nz / .nz domains. Ignore any non-NZ results entirely.
-- If a question cannot be answered from NZ sources, say: "I couldn't find a specific NZ requirement \
-for this — please check with your BCA or a licensed building professional."
+- If a question cannot be answered from the provided NZ sources, say: "I couldn't find a specific \
+NZ requirement for this — please check with your BCA or a licensed building professional."
 
 When answering, follow this priority order:
 
 1. *NZS 3604 (Timber Framed Buildings)* — check the retrieved sections at the top of this prompt first. \
 These are the most authoritative source for timber framing questions.
 2. *NZBC knowledge base* — check this for performance requirements and clause references (B1, E2, H1, etc.).
-3. *NZ web search* — only if neither source fully answers the question, and only use NZ sources.
 
 Always:
 - Cite the specific NZS 3604 clause or table number (e.g. "NZS 3604 Table 8.1") when available.
@@ -170,15 +166,17 @@ def ask_llm(user_id: int, question: str) -> str:
     if len(history) > MAX_HISTORY * 2:
         history[:] = history[-(MAX_HISTORY * 2):]
 
-    # Retrieve relevant NZS 3604 sections for this query
+    # Retrieve relevant NZS 3604 sections for this query (cap at 20k chars)
     nzs_context = search_nzs3604(question, top_n=3)
+    if len(nzs_context) > 20000:
+        nzs_context = nzs_context[:20000] + "\n[... truncated for length]"
     if nzs_context:
         log.info(f"NZS 3604 context injected ({len(nzs_context)} chars)")
 
     def _call(system: str) -> str | None:
         response = client.chat.completions.create(
             model=OPENROUTER_MODEL,
-            max_tokens=1500,
+            max_tokens=2000,
             messages=[
                 {"role": "system", "content": system},
                 *history,
